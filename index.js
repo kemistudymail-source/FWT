@@ -4,7 +4,7 @@ const path = require("path");
 const http = require("http");
 
 // ── Config ────────────────────────────────────────────────────────────────────
-const HELIUS_API_KEY = "05ac53c1-3ee2-4da3-a4ae-097d549f874e";
+const HELIUS_API_KEY = "a681719f-ec46-45e1-956a-6689652e22b7";
 const HELIUS_RPC = `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`;
 const HELIUS_TX  = `https://api-mainnet.helius-rpc.com/v0`;
 const TELEGRAM_TOKEN = "8769953136:AAHFrooUVd1yx8BxPbJVTJPhthyhW-ptTqY";
