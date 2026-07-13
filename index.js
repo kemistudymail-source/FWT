@@ -4,7 +4,10 @@ const path = require("path");
 const http = require("http");
 
 // ── Config ────────────────────────────────────────────────────────────────────
-const TELEGRAM_TOKEN = "1e2fac91-7f63-4c46-b3d5-aabc39a1f7e5";
+const HELIUS_API_KEY = "1e2fac91-7f63-4c46-b3d5-aabc39a1f7e5";
+const HELIUS_RPC = `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`;
+const HELIUS_TX  = `https://api-mainnet.helius-rpc.com/v0`;
+const TELEGRAM_TOKEN = "8769953136:AAHFrooUVd1yx8BxPbJVTJPhthyhW-ptTqY";
 const CHAT_ID = "5092755750";
 const PORT = process.env.PORT || 3000;
 
@@ -13,14 +16,14 @@ const MIN_GAP_HOURS = 36;
 const MIN_MC = 1000;
 const MAX_MC = 10000;
 const SCAN_INTERVAL_MS = 60 * 1000;
-const CREDIT_CHECK_INTERVAL_MS = 60 * 60 * 1000; // check credits every hour
 
+// Raydium CPMM + AMM v4 program IDs — all recent swaps go through these
 const RAYDIUM_PROGRAMS = [
-  "CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C",
-  "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8",
-  "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ35MKDzgCcn7",
-  "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo",
-  "Eo7WjKq67rjJQSZxS6z3YkapzY3eMj6Xy8X5EkAW7vAo",
+  "CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C", // CPMM (newest)
+  "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8", // Raydium AMM v4
+  "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ35MKDzgCcn7", // PumpFun AMM (post-bond filtered by MC)
+  "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo", // Meteora DLMM
+  "Eo7WjKq67rjJQSZxS6z3YkapzY3eMj6Xy8X5EkAW7vAo", // Meteora Dynamic AMM
 ];
 
 // ── HTTP server ───────────────────────────────────────────────────────────────
@@ -34,43 +37,6 @@ function log(tag, msg) {
 }
 function logError(tag, msg, err) {
   console.error(`[${new Date().toISOString()}] [${tag}] ${msg}`, err?.message || err || "");
-}
-
-// ── API Key — stored in key.json, swappable via Telegram command ──────────────
-const KEY_FILE = path.join(__dirname, "key.json");
-
-function loadApiKey() {
-  try {
-    if (fs.existsSync(KEY_FILE)) {
-      const data = JSON.parse(fs.readFileSync(KEY_FILE, "utf8"));
-      if (data.key) {
-        log("BOOT", `Loaded API key from key.json: ${data.key.slice(0, 8)}...`);
-        return data.key;
-      }
-    }
-  } catch (e) {
-    logError("BOOT", "Failed to load key.json:", e);
-  }
-  // Fallback to hardcoded key
-  return "05ac53c1-3ee2-4da3-a4ae-097d549f874e";
-}
-
-function saveApiKey(key) {
-  try {
-    fs.writeFileSync(KEY_FILE, JSON.stringify({ key }), "utf8");
-    log("KEY", `Saved new API key: ${key.slice(0, 8)}...`);
-  } catch (e) {
-    logError("KEY", "Failed to save key.json:", e);
-  }
-}
-
-let HELIUS_API_KEY = loadApiKey();
-
-function getHelixRpc() {
-  return `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`;
-}
-function getHeliusTx() {
-  return `https://api-mainnet.helius-rpc.com/v0`;
 }
 
 // ── Persistent state ──────────────────────────────────────────────────────────
@@ -127,135 +93,12 @@ function sendAlert(token) {
   log("ALERT", `${token.symbol} | MC $${Math.round(token.mc)} | Gap ${token.gapHours}h | Age ${token.ageDays}d`);
 }
 
-// ── Credit exhaustion tracker ─────────────────────────────────────────────────
-let creditAlertSent = false;
-let consecutiveFailures = 0;
-const MAX_FAILURES_BEFORE_ALERT = 3; // must fail 3 times in a row before alerting
-
-async function handleHeliusError(status, body) {
-  const isCredit = status === 402 || (body && body.toLowerCase().includes("credit"));
-  const isRateLimit = status === 429;
-
-  if (isCredit || isRateLimit) {
-    consecutiveFailures++;
-    if (consecutiveFailures >= MAX_FAILURES_BEFORE_ALERT && !creditAlertSent) {
-      creditAlertSent = true;
-      logError("HELIUS", `Credits exhausted after ${consecutiveFailures} failures (${status})`);
-      await sendTelegram(
-        `🪫 *Helius credits exhausted*\n\n` +
-        `The scanner has run out of API credits.\n\n` +
-        `To swap your key, send:\n` +
-        `\`/setkey YOUR_NEW_API_KEY\`\n\n` +
-        `Top up at helius.dev`
-      );
-    }
-  }
-}
-
-function resetCreditAlert() {
-  if (consecutiveFailures > 0) {
-    log("HELIUS", "Successful call — resetting failure counter");
-  }
-  consecutiveFailures = 0;
-  creditAlertSent = false;
-}
-
-// ── Helius: check remaining credits ──────────────────────────────────────────
-async function checkAndReportCredits() {
-  try {
-    const res = await fetch(
-      `https://api.helius.xyz/v0/api-usage?api-key=${HELIUS_API_KEY}`
-    );
-    if (!res.ok) return;
-    const json = await res.json();
-
-    // Helius returns dailyRequestCount and dailyRequestLimit
-    const used = json?.dailyRequestCount ?? null;
-    const limit = json?.dailyRequestLimit ?? null;
-
-    if (used === null || limit === null) return;
-
-    const remaining = limit - used;
-    const pct = Math.round((remaining / limit) * 100);
-
-    log("CREDITS", `Used: ${used.toLocaleString()} / ${limit.toLocaleString()} | Remaining: ${remaining.toLocaleString()} (${pct}%)`);
-
-    // Alert if below 20%
-    if (pct <= 20) {
-      await sendTelegram(
-        `⚠️ *Helius credits low*\n\n` +
-        `Used: ${used.toLocaleString()} / ${limit.toLocaleString()}\n` +
-        `Remaining: ${remaining.toLocaleString()} (${pct}%)\n\n` +
-        `Swap key with: \`/setkey YOUR_NEW_API_KEY\``
-      );
-    } else {
-      await sendTelegram(
-        `📊 *Helius Credit Report*\n\n` +
-        `Used: ${used.toLocaleString()} / ${limit.toLocaleString()}\n` +
-        `Remaining: ${remaining.toLocaleString()} (${pct}%)`
-      );
-    }
-  } catch (e) {
-    logError("CREDITS", "Failed to check credits:", e);
-  }
-}
-
-// ── Telegram commands ─────────────────────────────────────────────────────────
-bot.command("setkey", async (ctx) => {
-  // Only allow from your chat
-  if (String(ctx.chat.id) !== String(CHAT_ID)) return;
-
-  const parts = ctx.message.text.trim().split(/\s+/);
-  const newKey = parts[1];
-
-  if (!newKey) {
-    return ctx.reply("Usage: /setkey YOUR_NEW_HELIUS_API_KEY");
-  }
-
-  HELIUS_API_KEY = newKey;
-  saveApiKey(newKey);
-  consecutiveFailures = 0;
-  creditAlertSent = false;
-
-  log("KEY", `API key swapped to ${newKey.slice(0, 8)}... via Telegram`);
-  await ctx.reply(`✅ API key updated to ${newKey.slice(0, 8)}...\n\nScanner will resume on next scan.`);
-});
-
-bot.command("getkey", async (ctx) => {
-  if (String(ctx.chat.id) !== String(CHAT_ID)) return;
-  await ctx.reply(`🔑 Current Helius API key:
-\`${HELIUS_API_KEY}\``, { parse_mode: "Markdown" });
-});
-
-bot.command("credits", async (ctx) => {
-  if (String(ctx.chat.id) !== String(CHAT_ID)) return;
-  await ctx.reply("Checking credits...");
-  await checkAndReportCredits();
-});
-
-bot.command("status", async (ctx) => {
-  if (String(ctx.chat.id) !== String(CHAT_ID)) return;
-  await ctx.reply(
-    `📡 *Scanner Status*\n\n` +
-    `API key: \`${HELIUS_API_KEY.slice(0, 8)}...\`\n` +
-    `Tracking: ${Object.keys(state.lastSeen).length} tokens\n` +
-    `Alerted: ${state.alerted.size} tokens\n` +
-    `MC range: $${MIN_MC.toLocaleString()} – $${MAX_MC.toLocaleString()}\n` +
-    `Min age: ${MIN_TOKEN_AGE_DAYS} days\n` +
-    `Min gap: ${MIN_GAP_HOURS}h\n` +
-    `Scan every: ${SCAN_INTERVAL_MS / 1000}s`,
-    { parse_mode: "Markdown" }
-  );
-});
-
-// Start bot polling for commands
-bot.launch().catch((e) => logError("BOT", "Failed to launch bot:", e));
-
-// ── Helius: get recent txs for a program ──────────────────────────────────────
+// ── Helius: get recent txs for a program, extract token mints ─────────────────
 async function getRecentMintsFromProgram(programId) {
-  const mints = new Map();
+  const mints = new Map(); // mint → blockTime
   try {
-    const sigRes = await fetch(getHelixRpc(), {
+    // Get recent signatures for this program
+    const sigRes = await fetch(HELIUS_RPC, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -275,9 +118,10 @@ async function getRecentMintsFromProgram(programId) {
 
     log("FETCH", `${programId.slice(0, 8)}... → ${sigs.length} recent txs`);
 
+    // Parse transactions in batch via Helius enhanced API
     const signatures = sigs.map((s) => s.signature);
     const txRes = await fetch(
-      `${getHeliusTx()}/transactions?api-key=${HELIUS_API_KEY}`,
+      `${HELIUS_TX}/transactions?api-key=${HELIUS_API_KEY}`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -297,13 +141,13 @@ async function getRecentMintsFromProgram(programId) {
       for (const transfer of tx.tokenTransfers || []) {
         const mint = transfer.mint;
         if (!mint) continue;
+        // Keep earliest blockTime seen for this mint in this batch
         if (!mints.has(mint) || blockTime < mints.get(mint)) {
           mints.set(mint, blockTime);
         }
       }
     }
 
-    resetCreditAlert();
     log("FETCH", `${programId.slice(0, 8)}... → ${mints.size} unique swap mints`);
   } catch (e) {
     logError("FETCH", `Exception for ${programId.slice(0, 8)}:`, e);
@@ -311,10 +155,21 @@ async function getRecentMintsFromProgram(programId) {
   return mints;
 }
 
-// ── Helius: get last trade timestamp for a token ──────────────────────────────
+// ── Credit exhaustion tracker ─────────────────────────────────────────────────
+let creditAlertSent = false;
+
+async function handleHeliusError(status, body) {
+  if ((status === 402 || status === 429 || (body && body.includes("credit"))) && !creditAlertSent) {
+    creditAlertSent = true;
+    logError("HELIUS", `Credits exhausted or rate limited (${status})`);
+    await sendTelegram(`🪫 *Helius credits exhausted*\n\nThe scanner has run out of API credits and is no longer fetching data.\n\nTop up at helius.dev to resume.`);
+  }
+}
+
+// ── Helius: get last trade timestamp for a token ─────────────────────────────
 async function getLastTradeSec(mintAddress) {
   try {
-    const res = await fetch(getHelixRpc(), {
+    const res = await fetch(HELIUS_RPC, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -333,7 +188,7 @@ async function getLastTradeSec(mintAddress) {
       await handleHeliusError(200, json.error.message || "");
       return null;
     }
-    resetCreditAlert();
+    creditAlertSent = false; // reset on success
     const sigs = json?.result;
     if (!sigs?.length) return null;
     return sigs[0]?.blockTime || null;
@@ -351,6 +206,7 @@ async function getDexData(address) {
     const pairs = Array.isArray(json) ? json : (json?.pairs || []);
     if (!pairs.length) return null;
 
+    // Must have at least one non-PumpFun pair to be considered graduated
     const hasGraduated = pairs.some((p) => {
       const dexId = (p.dexId || "").toLowerCase();
       return !dexId.includes("pump");
@@ -373,10 +229,10 @@ async function getDexData(address) {
   }
 }
 
-// ── Helius: token age fallback ────────────────────────────────────────────────
+// ── Helius: token age fallback via oldest signature ───────────────────────────
 async function getTokenAgeDays(mintAddress) {
   try {
-    const res = await fetch(getHelixRpc(), {
+    const res = await fetch(HELIUS_RPC, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -400,6 +256,7 @@ async function getTokenAgeDays(mintAddress) {
 async function scan() {
   log("SCAN", "Starting scan...");
 
+  // Collect mints from all Raydium programs
   const allMints = new Map();
   for (const program of RAYDIUM_PROGRAMS) {
     const mints = await getRecentMintsFromProgram(program);
@@ -420,6 +277,8 @@ async function scan() {
     const prevLastSeen = state.lastSeen[mint];
     state.lastSeen[mint] = currentTxTime;
 
+    // First time seeing this token — look up actual last trade via Helius
+    // so we don't have to wait to observe the gap ourselves
     let effectivePrev = prevLastSeen;
     if (!effectivePrev) {
       const actualLast = await getLastTradeSec(mint);
@@ -427,28 +286,32 @@ async function scan() {
         effectivePrev = actualLast;
         log("SCAN", `New token ${mint.slice(0, 8)}... — fetched actual last trade`);
       } else {
-        continue;
+        continue; // can't determine gap, skip
       }
     }
 
+    // Check gap
     const gapHours = Math.floor((currentTxTime - effectivePrev) / 3600);
     if (gapHours < MIN_GAP_HOURS) { skippedGap++; continue; }
 
     log("SCAN", `Gap hit: ${mint.slice(0, 8)}... | ${gapHours}h gap — checking MC + age`);
 
+    // MC + age via DexScreener
     const dex = await getDexData(mint);
-    if (!dex) { log("SCAN", `No DexScreener data for ${mint.slice(0, 8)}...`); skippedMC++; continue; }
+    if (!dex) { log("SCAN", `No DexScreener data for ${mint.slice(0,8)}...`); skippedMC++; continue; }
     if (dex.mc < MIN_MC || dex.mc > MAX_MC) {
-      log("SCAN", `MC rejected: ${dex.symbol || mint.slice(0, 8)} $${Math.round(dex.mc).toLocaleString()} (range $${MIN_MC}-$${MAX_MC})`);
+      log("SCAN", `MC rejected: ${dex.symbol || mint.slice(0,8)} $${Math.round(dex.mc).toLocaleString()} (range $${MIN_MC}-$${MAX_MC})`);
       skippedMC++; continue;
     }
 
+    // Age check
     let ageDays = dex.pairCreatedAt
       ? Math.floor((Date.now() - dex.pairCreatedAt) / 86_400_000)
       : await getTokenAgeDays(mint);
 
     if (!ageDays || ageDays < MIN_TOKEN_AGE_DAYS) { skippedAge++; continue; }
 
+    // Passed
     passed++;
     state.alerted.add(mint);
     saveState(state);
@@ -470,11 +333,7 @@ sendTelegram(
   `Min age: ${MIN_TOKEN_AGE_DAYS} days\n` +
   `Min gap: ${MIN_GAP_HOURS}h dormant\n` +
   `Scan every: ${SCAN_INTERVAL_MS / 1000}s\n` +
-  `Tracking: ${Object.keys(state.lastSeen).length} tokens\n\n` +
-  `Commands:\n` +
-  `/setkey YOUR_KEY — swap Helius API key\n` +
-  `/credits — check remaining credits\n` +
-  `/status — bot status`
+  `Tracking: ${Object.keys(state.lastSeen).length} tokens`
 );
 
 process.on("uncaughtException", (e) => {
@@ -484,9 +343,6 @@ process.on("uncaughtException", (e) => {
 process.on("unhandledRejection", (e) => {
   logError("CRASH", "Unhandled rejection:", e);
 });
-
-// Hourly credit check
-setInterval(checkAndReportCredits, CREDIT_CHECK_INTERVAL_MS);
 
 scan();
 setInterval(scan, SCAN_INTERVAL_MS);
