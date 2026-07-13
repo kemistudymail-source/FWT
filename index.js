@@ -4,7 +4,7 @@ const path = require("path");
 const http = require("http");
 
 // ── Config ────────────────────────────────────────────────────────────────────
-const TELEGRAM_TOKEN = "8769953136:AAHFrooUVd1yx8BxPbJVTJPhthyhW-ptTqY";
+const TELEGRAM_TOKEN = "1e2fac91-7f63-4c46-b3d5-aabc39a1f7e5";
 const CHAT_ID = "5092755750";
 const PORT = process.env.PORT || 3000;
 
