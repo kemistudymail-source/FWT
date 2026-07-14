@@ -12,7 +12,7 @@ const CHAT_ID = "5092755750";
 const PORT = process.env.PORT || 3000;
 
 const MIN_TOKEN_AGE_DAYS = 29;
-const MIN_GAP_HOURS = 30;
+const MIN_GAP_HOURS = 36;
 const MIN_MC = 1000;
 const MAX_MC = 10000;
 const SCAN_INTERVAL_MS = 60 * 1000;
@@ -157,32 +157,13 @@ async function getRecentMintsFromProgram(programId) {
 
 // ── Credit exhaustion tracker ─────────────────────────────────────────────────
 let creditAlertSent = false;
-let consecutiveFailures = 0;
-const FAILURES_BEFORE_ALERT = 5;
 
 async function handleHeliusError(status, body) {
-  const isCredit = status === 402 || (body && body.toLowerCase().includes("credit"));
-  const isRateLimit = status === 429;
-  if (!isCredit && !isRateLimit) return;
-
-  consecutiveFailures++;
-  log("HELIUS", `Helius error ${consecutiveFailures}/${FAILURES_BEFORE_ALERT} (status ${status})`);
-
-  // Only fire alert once, never repeat
-  if (consecutiveFailures >= FAILURES_BEFORE_ALERT && !creditAlertSent) {
+  if ((status === 402 || status === 429 || (body && body.includes("credit"))) && !creditAlertSent) {
     creditAlertSent = true;
-    logError("HELIUS", "Credits exhausted — alert sent");
-    await sendTelegram(`🪫 *Helius credits exhausted*
-
-The scanner has run out of API credits and is no longer fetching data.
-
-Top up at helius.dev to resume.`);
+    logError("HELIUS", `Credits exhausted or rate limited (${status})`);
+    await sendTelegram(`🪫 *Helius credits exhausted*\n\nThe scanner has run out of API credits and is no longer fetching data.\n\nTop up at helius.dev to resume.`);
   }
-}
-
-function resetHeliusErrors() {
-  consecutiveFailures = 0;
-  // Don't reset creditAlertSent here — once sent, never repeat
 }
 
 // ── Helius: get last trade timestamp for a token ─────────────────────────────
@@ -207,7 +188,7 @@ async function getLastTradeSec(mintAddress) {
       await handleHeliusError(200, json.error.message || "");
       return null;
     }
-    resetHeliusErrors(); // reset failure counter on success
+    creditAlertSent = false; // reset on success
     const sigs = json?.result;
     if (!sigs?.length) return null;
     return sigs[0]?.blockTime || null;
@@ -363,8 +344,52 @@ process.on("unhandledRejection", (e) => {
   logError("CRASH", "Unhandled rejection:", e);
 });
 
-// Small boot delay to avoid hammering Helius immediately on deploy
-setTimeout(() => {
-  scan();
-  setInterval(scan, SCAN_INTERVAL_MS);
-}, 5000);
+// ── /credits command ─────────────────────────────────────────────────────────
+bot.command("credits", async (ctx) => {
+  if (String(ctx.chat.id) !== String(CHAT_ID)) return;
+  try {
+    const res = await fetch(`https://api.helius.xyz/v0/api-usage?api-key=${HELIUS_API_KEY}`);
+    if (!res.ok) {
+      await ctx.reply("Could not fetch credit info from Helius.");
+      return;
+    }
+    const json = await res.json();
+    const used = json?.dailyRequestCount ?? null;
+    const limit = json?.dailyRequestLimit ?? null;
+
+    if (used === null || limit === null) {
+      await ctx.reply("Credit data unavailable.");
+      return;
+    }
+
+    const remaining = limit - used;
+    const pct = Math.round((remaining / limit) * 100);
+    const filled = Math.round(pct / 5);
+    const empty = 20 - filled;
+    const bar = "█".repeat(filled) + "░".repeat(empty);
+
+    const emoji = pct > 50 ? "🟢" : pct > 20 ? "🟡" : "🔴";
+
+    const msg =
+      `📊 *Helius Credit Meter*
+
+` +
+      `${emoji} \`${bar}\` ${pct}%
+
+` +
+      `Used:      ${used.toLocaleString()}
+` +
+      `Remaining: ${remaining.toLocaleString()}
+` +
+      `Limit:     ${limit.toLocaleString()}`;
+
+    await ctx.reply(msg, { parse_mode: "Markdown" });
+  } catch (e) {
+    await ctx.reply("Error fetching credits: " + e.message);
+  }
+});
+
+bot.launch().catch((e) => logError("BOT", "Failed to launch bot:", e));
+
+scan();
+setInterval(scan, SCAN_INTERVAL_MS);
