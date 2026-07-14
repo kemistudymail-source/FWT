@@ -4,7 +4,7 @@ const path = require("path");
 const http = require("http");
 
 // ── Config ────────────────────────────────────────────────────────────────────
-const HELIUS_API_KEY = "a7203f6a-0851-4718-8ef8-cd07af639756";
+const HELIUS_API_KEY = "05ac53c1-3ee2-4da3-a4ae-097d549f874e";
 const HELIUS_RPC = `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`;
 const HELIUS_TX  = `https://api-mainnet.helius-rpc.com/v0`;
 const TELEGRAM_TOKEN = "8769953136:AAHFrooUVd1yx8BxPbJVTJPhthyhW-ptTqY";
@@ -12,7 +12,7 @@ const CHAT_ID = "5092755750";
 const PORT = process.env.PORT || 3000;
 
 const MIN_TOKEN_AGE_DAYS = 29;
-const MIN_GAP_HOURS = 36;
+const MIN_GAP_HOURS = 30;
 const MIN_MC = 1000;
 const MAX_MC = 10000;
 const SCAN_INTERVAL_MS = 60 * 1000;
@@ -157,13 +157,32 @@ async function getRecentMintsFromProgram(programId) {
 
 // ── Credit exhaustion tracker ─────────────────────────────────────────────────
 let creditAlertSent = false;
+let consecutiveFailures = 0;
+const FAILURES_BEFORE_ALERT = 5;
 
 async function handleHeliusError(status, body) {
-  if ((status === 402 || status === 429 || (body && body.includes("credit"))) && !creditAlertSent) {
+  const isCredit = status === 402 || (body && body.toLowerCase().includes("credit"));
+  const isRateLimit = status === 429;
+  if (!isCredit && !isRateLimit) return;
+
+  consecutiveFailures++;
+  log("HELIUS", `Helius error ${consecutiveFailures}/${FAILURES_BEFORE_ALERT} (status ${status})`);
+
+  // Only fire alert once, never repeat
+  if (consecutiveFailures >= FAILURES_BEFORE_ALERT && !creditAlertSent) {
     creditAlertSent = true;
-    logError("HELIUS", `Credits exhausted or rate limited (${status})`);
-    await sendTelegram(`🪫 *Helius credits exhausted*\n\nThe scanner has run out of API credits and is no longer fetching data.\n\nTop up at helius.dev to resume.`);
+    logError("HELIUS", "Credits exhausted — alert sent");
+    await sendTelegram(`🪫 *Helius credits exhausted*
+
+The scanner has run out of API credits and is no longer fetching data.
+
+Top up at helius.dev to resume.`);
   }
+}
+
+function resetHeliusErrors() {
+  consecutiveFailures = 0;
+  // Don't reset creditAlertSent here — once sent, never repeat
 }
 
 // ── Helius: get last trade timestamp for a token ─────────────────────────────
@@ -188,7 +207,7 @@ async function getLastTradeSec(mintAddress) {
       await handleHeliusError(200, json.error.message || "");
       return null;
     }
-    creditAlertSent = false; // reset on success
+    resetHeliusErrors(); // reset failure counter on success
     const sigs = json?.result;
     if (!sigs?.length) return null;
     return sigs[0]?.blockTime || null;
@@ -344,5 +363,8 @@ process.on("unhandledRejection", (e) => {
   logError("CRASH", "Unhandled rejection:", e);
 });
 
-scan();
-setInterval(scan, SCAN_INTERVAL_MS);
+// Small boot delay to avoid hammering Helius immediately on deploy
+setTimeout(() => {
+  scan();
+  setInterval(scan, SCAN_INTERVAL_MS);
+}, 5000);
