@@ -344,52 +344,5 @@ process.on("unhandledRejection", (e) => {
   logError("CRASH", "Unhandled rejection:", e);
 });
 
-// ── /credits command ─────────────────────────────────────────────────────────
-bot.command("credits", async (ctx) => {
-  if (String(ctx.chat.id) !== String(CHAT_ID)) return;
-  try {
-    const res = await fetch(`https://api.helius.xyz/v0/api-usage?api-key=${HELIUS_API_KEY}`);
-    if (!res.ok) {
-      await ctx.reply("Could not fetch credit info from Helius.");
-      return;
-    }
-    const json = await res.json();
-    const used = json?.dailyRequestCount ?? null;
-    const limit = json?.dailyRequestLimit ?? null;
-
-    if (used === null || limit === null) {
-      await ctx.reply("Credit data unavailable.");
-      return;
-    }
-
-    const remaining = limit - used;
-    const pct = Math.round((remaining / limit) * 100);
-    const filled = Math.round(pct / 5);
-    const empty = 20 - filled;
-    const bar = "█".repeat(filled) + "░".repeat(empty);
-
-    const emoji = pct > 50 ? "🟢" : pct > 20 ? "🟡" : "🔴";
-
-    const msg =
-      `📊 *Helius Credit Meter*
-
-` +
-      `${emoji} \`${bar}\` ${pct}%
-
-` +
-      `Used:      ${used.toLocaleString()}
-` +
-      `Remaining: ${remaining.toLocaleString()}
-` +
-      `Limit:     ${limit.toLocaleString()}`;
-
-    await ctx.reply(msg, { parse_mode: "Markdown" });
-  } catch (e) {
-    await ctx.reply("Error fetching credits: " + e.message);
-  }
-});
-
-bot.launch().catch((e) => logError("BOT", "Failed to launch bot:", e));
-
 scan();
 setInterval(scan, SCAN_INTERVAL_MS);
